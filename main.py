@@ -1,14 +1,13 @@
 """
-main.py - FastAPI auth with JWT (env-configured; safe for deploy)
+main.py - FastAPI auth with JWT (env-configured) + reset-password endpoint
 
 Required environment variables:
-- DATABASE_URL          (e.g. postgresql+asyncpg://user:pass@host:port/db or Render's postgres:// — code will convert)
-- SECRET_KEY            (long random string)
-- ROOT_URL              (optional; used to build reset links, e.g., https://my-app.onrender.com)
-- ACCESS_TOKEN_EXPIRE_MINUTES (optional integer minutes; default 10080 i.e. 7 days)
-
-For local development you may create a .env file containing these (the code uses python-dotenv).
+- DATABASE_URL                  (e.g. postgresql+asyncpg://user:pass@host:port/db OR Render postgres://... will be converted)
+- SECRET_KEY                    (long random string)
+- ROOT_URL                      (optional; used to build reset links, e.g. https://my-app.onrender.com)
+- ACCESS_TOKEN_EXPIRE_MINUTES   (optional integer; default 10080 = 7 days)
 """
+
 import os
 import secrets
 from datetime import datetime, timedelta
@@ -25,18 +24,15 @@ from email_validator import validate_email
 from dotenv import load_dotenv
 from jose import jwt, JWTError
 
-# Load local .env for convenience in development (this is ignored by git via .gitignore)
+# Load local .env for development (ignored in git)
 load_dotenv(override=False)
 
-# ---------------- CONFIG (from environment) ----------------
+# ---------------- CONFIG from environment ----------------
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
-    raise RuntimeError(
-        "DATABASE_URL is not set. Example (async): "
-        "postgresql+asyncpg://user:pass@host:port/db"
-    )
+    raise RuntimeError("Set DATABASE_URL in environment (e.g. postgresql+asyncpg://user:pass@host:port/db)")
 
-# Convert common Render-style URL if needed:
+# Render often provides postgres://... convert for SQLAlchemy+asyncpg
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
 elif DATABASE_URL.startswith("postgresql://") and "+asyncpg" not in DATABASE_URL:
@@ -44,11 +40,10 @@ elif DATABASE_URL.startswith("postgresql://") and "+asyncpg" not in DATABASE_URL
 
 SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:
-    raise RuntimeError("SECRET_KEY is not set. Set a long random string for signing tokens.")
+    raise RuntimeError("Set SECRET_KEY in environment (a long random string)")
 
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 60 * 24 * 7))
-
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 60 * 24 * 7))  # default 7 days
 ROOT_URL = os.getenv("ROOT_URL", "http://localhost:8000").rstrip("/")
 
 # ---------------- hashing (Argon2) ----------------
@@ -79,13 +74,17 @@ class SignInIn(BaseModel):
     email: EmailStr
     password: str
 
-class Token(BaseModel):
+class TokenOut(BaseModel):
     access_token: str
     token_type: str = "bearer"
     expires_in: Optional[int] = None
 
-class ForgotPassword(BaseModel):
+class ForgotPasswordIn(BaseModel):
     email: EmailStr
+
+class ResetPasswordIn(BaseModel):
+    token: str = Field(..., min_length=8)
+    new_password: str = Field(..., min_length=6)
 
 # ---------------- UTILITIES ----------------
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
@@ -113,18 +112,23 @@ def create_access_token(subject: str, expires_minutes: Optional[int] = None) -> 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/signin")
 
 # ---------------- APP ----------------
-app = FastAPI(title="Simple Auth with JWT (env-configured)")
+app = FastAPI(title="Auth (JWT) with Reset Password")
 
 @app.on_event("startup")
 async def startup_create_tables():
-    # Creates tables if they don't exist - for production use migrations (Alembic).
+    # Create tables if not present (dev only). Use Alembic for production migrations.
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+# ---------------- ROOT ----------------
+@app.get("/")
+async def root():
+    return {"status": "ok", "service": "FastAPI backend is running"}
 
 # ---------------- ENDPOINTS ----------------
 @app.post("/signup")
 async def signup(payload: SignUp, db: AsyncSession = Depends(get_db)):
-    # validate email format strictly
+    # Strict email validation
     try:
         validate_email(payload.email)
     except Exception:
@@ -145,7 +149,8 @@ async def signup(payload: SignUp, db: AsyncSession = Depends(get_db)):
     await db.refresh(new_user)
     return {"message": "User created successfully", "user_id": new_user.id, "email": new_user.email}
 
-@app.post("/signin", response_model=Token)
+# signin supports OAuth2 form-data or JSON body
+@app.post("/signin", response_model=TokenOut)
 async def signin(
     form_data: OAuth2PasswordRequestForm = Depends(None),
     body: SignInIn | None = None,
@@ -164,7 +169,6 @@ async def signin(
     user = q.scalar_one_or_none()
 
     auth_error = HTTPException(status_code=401, detail="Incorrect email or password")
-
     if not user:
         raise auth_error
 
@@ -178,13 +182,13 @@ async def signin(
     return {"access_token": token, "token_type": "bearer", "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60}
 
 @app.post("/forgot-password")
-async def forgot_password(payload: ForgotPassword, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
+async def forgot_password(payload: ForgotPasswordIn, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
     q = await db.execute(select(User).where(User.email == payload.email.lower()))
     user = q.scalar_one_or_none()
 
     generic_msg = {"message": "If the email exists, password reset instructions have been sent."}
-
     if not user:
+        # Don't reveal whether email exists
         return generic_msg
 
     token = generate_reset_token()
@@ -197,13 +201,45 @@ async def forgot_password(payload: ForgotPassword, background_tasks: BackgroundT
 
     reset_link = f"{ROOT_URL}/reset?token={token}"
 
-    # Developer-mode: print the reset link to logs (Render logs will show it)
+    # developer-mode: print the reset link to logs (Render logs)
     def _print_link(link: str):
         print("PASSWORD RESET LINK (developer):", link)
 
     background_tasks.add_task(_print_link, reset_link)
 
-    # In production you would send an email with the reset link here
+    # In production: send email with reset_link
+    return generic_msg
+
+@app.post("/reset-password")
+async def reset_password(payload: ResetPasswordIn, db: AsyncSession = Depends(get_db)):
+    """
+    Accepts { token, new_password }.
+    Validates the token + expiry, updates the user's password, clears token.
+    Returns a generic message to avoid revealing token validity.
+    """
+    q = await db.execute(select(User).where(User.reset_token == payload.token))
+    user = q.scalar_one_or_none()
+
+    generic_msg = {"message": "If the token is valid, the password has been reset."}
+
+    if not user:
+        return generic_msg
+
+    # Validate expiry
+    if not user.reset_token_expiry or user.reset_token_expiry < datetime.utcnow():
+        # Clear expired token for safety
+        user.reset_token = None
+        user.reset_token_expiry = None
+        db.add(user)
+        await db.commit()
+        return generic_msg
+
+    # Update password and invalidate token
+    user.hashed_password = hash_password(payload.new_password)
+    user.reset_token = None
+    user.reset_token_expiry = None
+    db.add(user)
+    await db.commit()
     return generic_msg
 
 # ---------------- AUTH DEPENDENCY ----------------
@@ -229,7 +265,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession
         raise HTTPException(status_code=400, detail="Inactive user")
     return user
 
-# Protected example route
+# ---------------- Protected route ----------------
 @app.get("/me")
 async def read_me(current_user: User = Depends(get_current_user)):
     return {"id": current_user.id, "email": current_user.email, "created_at": current_user.created_at.isoformat()}
