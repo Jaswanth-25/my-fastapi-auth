@@ -1,13 +1,6 @@
+﻿"""main.py - FastAPI auth with JWT (env-configured) + reset-password endpoint
+(keeps config via env; ready for Render; includes GET /, /signup, /signin, /forgot-password, /reset-password, /me)
 """
-main.py - FastAPI auth with JWT (env-configured) + reset-password endpoint
-
-Required environment variables:
-- DATABASE_URL                  (e.g. postgresql+asyncpg://user:pass@host:port/db OR Render postgres://... will be converted)
-- SECRET_KEY                    (long random string)
-- ROOT_URL                      (optional; used to build reset links, e.g. https://my-app.onrender.com)
-- ACCESS_TOKEN_EXPIRE_MINUTES   (optional integer; default 10080 = 7 days)
-"""
-
 import os
 import secrets
 from datetime import datetime, timedelta
@@ -24,15 +17,13 @@ from email_validator import validate_email
 from dotenv import load_dotenv
 from jose import jwt, JWTError
 
-# Load local .env for development (ignored in git)
 load_dotenv(override=False)
 
-# ---------------- CONFIG from environment ----------------
+# CONFIG
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("Set DATABASE_URL in environment (e.g. postgresql+asyncpg://user:pass@host:port/db)")
 
-# Render often provides postgres://... convert for SQLAlchemy+asyncpg
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
 elif DATABASE_URL.startswith("postgresql://") and "+asyncpg" not in DATABASE_URL:
@@ -43,18 +34,15 @@ if not SECRET_KEY:
     raise RuntimeError("Set SECRET_KEY in environment (a long random string)")
 
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 60 * 24 * 7))  # default 7 days
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 60 * 24 * 7))
 ROOT_URL = os.getenv("ROOT_URL", "http://localhost:8000").rstrip("/")
 
-# ---------------- hashing (Argon2) ----------------
 pwd_ctx = CryptContext(schemes=["argon2"], deprecated="auto")
 
-# ---------------- DB setup ----------------
 engine = create_async_engine(DATABASE_URL, echo=False, future=True)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
 
-# ---------------- MODELS ----------------
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
@@ -65,7 +53,6 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-# ---------------- SCHEMAS ----------------
 class SignUp(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=6)
@@ -86,7 +73,6 @@ class ResetPasswordIn(BaseModel):
     token: str = Field(..., min_length=8)
     new_password: str = Field(..., min_length=6)
 
-# ---------------- UTILITIES ----------------
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async with AsyncSessionLocal() as session:
         yield session
@@ -111,24 +97,19 @@ def create_access_token(subject: str, expires_minutes: Optional[int] = None) -> 
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/signin")
 
-# ---------------- APP ----------------
 app = FastAPI(title="Auth (JWT) with Reset Password")
 
 @app.on_event("startup")
 async def startup_create_tables():
-    # Create tables if not present (dev only). Use Alembic for production migrations.
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-# ---------------- ROOT ----------------
 @app.get("/")
 async def root():
     return {"status": "ok", "service": "FastAPI backend is running"}
 
-# ---------------- ENDPOINTS ----------------
 @app.post("/signup")
 async def signup(payload: SignUp, db: AsyncSession = Depends(get_db)):
-    # Strict email validation
     try:
         validate_email(payload.email)
     except Exception:
@@ -149,7 +130,6 @@ async def signup(payload: SignUp, db: AsyncSession = Depends(get_db)):
     await db.refresh(new_user)
     return {"message": "User created successfully", "user_id": new_user.id, "email": new_user.email}
 
-# signin supports OAuth2 form-data or JSON body
 @app.post("/signin", response_model=TokenOut)
 async def signin(
     form_data: OAuth2PasswordRequestForm = Depends(None),
@@ -188,7 +168,6 @@ async def forgot_password(payload: ForgotPasswordIn, background_tasks: Backgroun
 
     generic_msg = {"message": "If the email exists, password reset instructions have been sent."}
     if not user:
-        # Don't reveal whether email exists
         return generic_msg
 
     token = generate_reset_token()
@@ -201,22 +180,14 @@ async def forgot_password(payload: ForgotPasswordIn, background_tasks: Backgroun
 
     reset_link = f"{ROOT_URL}/reset?token={token}"
 
-    # developer-mode: print the reset link to logs (Render logs)
     def _print_link(link: str):
         print("PASSWORD RESET LINK (developer):", link)
 
     background_tasks.add_task(_print_link, reset_link)
-
-    # In production: send email with reset_link
     return generic_msg
 
 @app.post("/reset-password")
 async def reset_password(payload: ResetPasswordIn, db: AsyncSession = Depends(get_db)):
-    """
-    Accepts { token, new_password }.
-    Validates the token + expiry, updates the user's password, clears token.
-    Returns a generic message to avoid revealing token validity.
-    """
     q = await db.execute(select(User).where(User.reset_token == payload.token))
     user = q.scalar_one_or_none()
 
@@ -225,16 +196,13 @@ async def reset_password(payload: ResetPasswordIn, db: AsyncSession = Depends(ge
     if not user:
         return generic_msg
 
-    # Validate expiry
     if not user.reset_token_expiry or user.reset_token_expiry < datetime.utcnow():
-        # Clear expired token for safety
         user.reset_token = None
         user.reset_token_expiry = None
         db.add(user)
         await db.commit()
         return generic_msg
 
-    # Update password and invalidate token
     user.hashed_password = hash_password(payload.new_password)
     user.reset_token = None
     user.reset_token_expiry = None
@@ -242,7 +210,6 @@ async def reset_password(payload: ResetPasswordIn, db: AsyncSession = Depends(ge
     await db.commit()
     return generic_msg
 
-# ---------------- AUTH DEPENDENCY ----------------
 async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)) -> User:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -265,12 +232,10 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession
         raise HTTPException(status_code=400, detail="Inactive user")
     return user
 
-# ---------------- Protected route ----------------
 @app.get("/me")
 async def read_me(current_user: User = Depends(get_current_user)):
     return {"id": current_user.id, "email": current_user.email, "created_at": current_user.created_at.isoformat()}
 
-# ---------------- Run (dev) ----------------
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
