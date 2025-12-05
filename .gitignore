@@ -1,45 +1,28 @@
-# Python cache
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*$py.class
 
-# Virtual environment
-venv/
-env/
+# Virtualenv
 .venv/
-.python-version
+venv/
+ENV/
+env/
 
-# Editor / IDE files
+# dotenv file
+.env
+
+# IDEs and editors
 .vscode/
 .idea/
 
-# Local environment variables
-.env
-.env.*
-
-# Byte-compiled files
-*.so
-
-# Build / distribution
-build/
-dist/
-*.egg-info/
-
-# SQLite files (if used locally)
-*.db
-
-# Logs
-logs/
+# logs
 *.log
 
 # OS files
 .DS_Store
 Thumbs.db
 
-# Coverage / test artifacts
-.coverage
-htmlcov/
-
-# Render specific (local files only)
-render.yaml
+# SQLite (if ever created locally)
+*.db
+*.sqlite3
