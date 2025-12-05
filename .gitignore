@@ -1,0 +1,45 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+env/
+.venv/
+.python-version
+
+# Editor / IDE files
+.vscode/
+.idea/
+
+# Local environment variables
+.env
+.env.*
+
+# Byte-compiled files
+*.so
+
+# Build / distribution
+build/
+dist/
+*.egg-info/
+
+# SQLite files (if used locally)
+*.db
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Coverage / test artifacts
+.coverage
+htmlcov/
+
+# Render specific (local files only)
+render.yaml
